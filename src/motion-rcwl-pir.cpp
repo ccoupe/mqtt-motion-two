@@ -16,13 +16,15 @@ const char* ssid = "CJCNET";
 const char* password = "LostAgain2";
 
 // Add your MQTT Broker IP address, device name, topic 
-//const char* mqtt_server = "192.168.1.144";
 const char* mqtt_server = "192.168.1.7";
 #define MQTT_DEVICE "ESP32_MotionTwo"
 #define MQTT_TOPIC "sensors/office/motion2"
 #define MQTT_CMD   "sensors/office/motion2"
 
 boolean turnedOn = true;  // controls whether device sends to MQTT
+#define ACTIVE 1
+#define INACTIVE 0
+int state = INACTIVE;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -41,8 +43,8 @@ volatile uint32_t lastIsrAt = 0;
 //const int led = 2;
 
 // RCWL-0516 Microwave motion sensor
-const int motionSensor = 17;
-volatile boolean haveMotion = false;      // set by ISR
+const int mwSensor = 17;
+volatile boolean haveMw = false;      // set by ISR
 
 // AM312 pir motion sensor
 #define  pirSensor 16
@@ -61,7 +63,7 @@ void IRAM_ATTR intrPir() {
 //Interrupt handler for motion on RCWL-0516 pir
 void IRAM_ATTR detectsMovement() {
   Serial.println("RCWL ISR");
-  haveMotion = true;
+  haveMw = true;
 }
 
 void IRAM_ATTR onTimer(){
@@ -113,9 +115,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
   if (String(topic) == MQTT_CMD) {
     if(messageTemp == "enable") {
       turnedOn = true;
+      state = INACTIVE;
       Serial.println("mqtt sent an enable");
     } else if (messageTemp == "disable") {
       turnedOn = false;
+      state = INACTIVE;
       Serial.println("mqtt sent a disable");
     }
   }
@@ -151,14 +155,13 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(pirSensor), intrPir, RISING);
   
   // Microwave Motion Sensor mode INPUT_PULLUP
-  pinMode(motionSensor, INPUT_PULLUP);
+  pinMode(mwSensor, INPUT_PULLUP);
   // Set motionSensor pin as interrupt, assign interrupt function and set RISING mode
-  attachInterrupt(digitalPinToInterrupt(motionSensor), detectsMovement, RISING);
+  attachInterrupt(digitalPinToInterrupt(mwSensor), detectsMovement, RISING);
 
   //pinMode(led, OUTPUT);
   //digitalWrite(led, LOW);
 }
-
 
 
 void reconnect() {
@@ -186,41 +189,33 @@ void loop() {
   }
   client.loop();
 
-  // wait for the haveMotion var to be set by the ISR
-  if (haveMotion && havePir) {
-    //portENTER_CRITICAL(&motionMux);
-    // publish to MQTT
+  if (haveMw && havePir && state == INACTIVE) {
     if (turnedOn) 
       client.publish(MQTT_TOPIC, "active");
-    haveMotion = false;
-    havePir = false;
-    // begin countdown to responding
-    motionCount = delaySeconds;     // while motion, keep delaying
-    //portEXIT_CRITICAL(&motionMux);
-    //digitalWrite(led, HIGH);
-    Serial.println("Motion BEGIN");
+    state = ACTIVE;
+    Serial.println(" Motion Begin");
   }
-  // If one second Timer has fired
-  if (turnedOn && xSemaphoreTake(timerSemaphore, 0) == pdTRUE) {
-    uint32_t isrCount = 0;
-    // Read the interrupt count and time
-    portENTER_CRITICAL(&timerMux);
-    isrCount = isrCounter;
-    portEXIT_CRITICAL(&timerMux);
-    Serial.print("Tick ");
-    Serial.print(isrCount);
-    if (motionCount > 0) {
+  if (state == ACTIVE && xSemaphoreTake(timerSemaphore, 0) == pdTRUE) {
+    if (haveMw || havePir) {
+      if (haveMw)
+        haveMw = false;
+      if (havePir)
+        havePir = false;
+      motionCount = delaySeconds;     // while motion, keep reseting countdown
+      Serial.println("Motion continued");
+    } else if (motionCount > 0) {
       motionCount--;
       if (motionCount == 0) {
         // publish to MQTT
         if (turnedOn) 
           client.publish(MQTT_TOPIC, "inactive");
-        Serial.println(" Motion END");
-        //digitalWrite(led, LOW);
-      } else
-        Serial.print(" counting down from ");
+        state = INACTIVE;
+        Serial.println(" Motion End");
+      }
+      else {
+        Serial.print("countdown ");
         Serial.println(motionCount);
-    } else 
-      Serial.println(" no motion");
-  } 
+      }
+    }
+  }
 }
